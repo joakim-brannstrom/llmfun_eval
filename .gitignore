@@ -26,3 +26,4 @@ target/
 evaluation_framework
 datasets/images
 llmfun/data/scratch/*
+program/*

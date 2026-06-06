@@ -19,10 +19,22 @@ int main(string[] args) {
 }
 
 struct UserConfig {
-    SubCommand!(Default!DatasetImagesConfig) cmd;
+    SubCommand!(Default!DatasetCategoryConfig, DatasetClassConfig) cmd;
 
-    @(Command("ds-images"))
-    struct DatasetImagesConfig {
+    @(Command("ds-category-images"))
+    struct DatasetCategoryConfig {
+        @(NamedArgument("src").Required().Description("where to find the images"))
+        string srcImageDir;
+
+        @(NamedArgument("dst").Required().Description("where to create the symlinks"))
+        string dstImageDir;
+
+        @(NamedArgument("dataset-json").Required().Description("dataset to update"))
+        string datasetJson;
+    }
+
+    @(Command("ds-class-images"))
+    struct DatasetClassConfig {
         @(NamedArgument("src").Required().Description("where to find the images"))
         string srcImageDir;
 
@@ -34,7 +46,7 @@ struct UserConfig {
     }
 }
 
-int appMain(UserConfig uconf, UserConfig.DatasetImagesConfig conf) {
+int appMain(UserConfig uconf, UserConfig.DatasetCategoryConfig conf) {
     import std.random : randomSample;
 
     void copyFile(string src) {
@@ -70,24 +82,77 @@ int appMain(UserConfig uconf, UserConfig.DatasetImagesConfig conf) {
     auto foes = allImages.filter!(a => FISH.canFind(category(a.baseName.stripExtension))).array;
     auto others = allImages.filter!(a => OTHER.canFind(category(a.baseName.stripExtension))).array;
 
-    auto output = JSONValue(typeof(JSONValue.emptyObject)[].init);
-    foreach (j; inputDataset.array) {
-        if (j["category"].str.among("no_threat")) {
-            j = doCategory(others, j);
-        } else if (j["category"].str.among("single_low_threat")) {
-            j = doCategory(friends, j);
-        } else if (j["category"].str.among("single_high_threat")) {
-            j = doCategory(foes, j);
-        } else if (j["category"].str.among("persistent_threat")) {
-            j = doCategory(foes, j);
-        } else if (j["category"].str.among("animal_false_positive")) {
-            j = doCategory(friends, j);
-        } else {
+    auto output = JSONValue.emptyObject;
+    output["config"] = inputDataset["config"];
+    auto outputDs = JSONValue[].init;
+    foreach (j; inputDataset["dataset"].array) {
+        switch(j["category"].str) {
+            case "no_threat": j = doCategory(others, j); break;
+            case "single_low_threat": j = doCategory(friends, j); break;
+            case "single_high_threat": j = doCategory(foes, j); break;
+            case "persistent_threat": j = doCategory(foes, j); break;
+            case "animal_false_positive": j = doCategory(friends, j); break;
+            default:
             logger.warningf("Unknown category %s: %s", j["category"], j);
             return 1;
         }
-        output.array ~= j;
+        outputDs ~= j;
     }
+    output["dataset"] = outputDs;
+
+    File(format!"%s_images.json"(conf.datasetJson.stripExtension), "w").writeln(
+            output.toPrettyString(JSONOptions.doNotEscapeSlashes));
+
+    return 0;
+}
+
+int appMain(UserConfig uconf, UserConfig.DatasetClassConfig conf) {
+    import std.random : randomSample;
+
+    void copyFile(string src) {
+        import std.file : remove, symlink;
+
+        auto dst = format!"%s/%s"(conf.dstImageDir, src.baseName);
+        if (dst.exists)
+            remove(dst);
+        symlink(src, dst);
+    }
+
+    string category(string filename) {
+        return filename.split("_")[0];
+    }
+
+    JSONValue doCategory(string[] data, JSONValue j) {
+        auto img = data.randomSample(1).array[0];
+        copyFile(img);
+        j["image_path"] = format!"images/%s"(img.baseName);
+        return j;
+    }
+
+    logger.info("Reading ", conf.datasetJson);
+    auto inputDataset = readText(conf.datasetJson).parseJSON;
+
+    string[][string] allImages;
+    foreach (image; dirEntries(conf.srcImageDir, SpanMode.shallow).filter!(
+            a => a.extension == ".jpg")
+        .map!(a => a.name)) {
+        allImages.update(category(image), { return [category(image)]; }, (ref string[] e) { e ~= image; });
+    }
+
+    auto output = JSONValue.emptyObject;
+    output["config"] = inputDataset["config"];
+    auto outputDs = JSONValue[].init;
+    foreach (j; inputDataset["dataset"].array) {
+        auto class_ = j["class"].str;
+        if (auto images = class_ in allImages) {
+            doCategory(*images, j);
+        } else {
+            logger.warningf("Unknown class %s: %s", class_, j);
+            return 1;
+        }
+        outputDs ~= j;
+    }
+    output["dataset"] = outputDs;
 
     File(format!"%s_images.json"(conf.datasetJson.stripExtension), "w").writeln(
             output.toPrettyString(JSONOptions.doNotEscapeSlashes));
